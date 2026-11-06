@@ -59,6 +59,55 @@ jobs:
       env:
         TAILSCALE_AUTH_TOKEN: ${{ secrets.TAILSCALE_AUTH_TOKEN }}
 
+    - name: Enable Windows SSH PowerShell
+  shell: powershell
+  env:
+    SSH_PUBLIC_KEY: ${{ secrets.WINDOWS_SSH_PUBLIC_KEY }}
+  run: |
+    $cap = Get-WindowsCapability -Online |
+      Where-Object Name -like 'OpenSSH.Server*'
+
+    if ($cap.State -ne 'Installed') {
+      Add-WindowsCapability -Online -Name $cap.Name
+    }
+
+    $keyPath = "$env:ProgramData\ssh\administrators_authorized_keys"
+
+    Set-Content -Path $keyPath -Value $env:SSH_PUBLIC_KEY -Encoding ascii
+
+    icacls.exe $keyPath /inheritance:r
+    icacls.exe $keyPath /grant "Administrators:F" "SYSTEM:F"
+
+    New-Item -Path "HKLM:\SOFTWARE\OpenSSH" -Force | Out-Null
+
+    New-ItemProperty `
+      -Path "HKLM:\SOFTWARE\OpenSSH" `
+      -Name DefaultShell `
+      -Value "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" `
+      -PropertyType String -Force
+
+    Set-Service sshd -StartupType Automatic
+    Start-Service sshd
+
+    if (-not (Get-NetFirewallRule -Name "Tailscale-SSH" -ErrorAction SilentlyContinue)) {
+      New-NetFirewallRule `
+        -Name "Tailscale-SSH" `
+        -Direction Inbound `
+        -Protocol TCP `
+        -LocalPort 22 `
+        -RemoteAddress 100.64.0.0/10 `
+        -Action Allow
+    }
+
+    Write-Host "Windows user: $env:USERNAME"
+    Get-Service sshd
+
+    - name: Expose PowerShell SSH
+  shell: powershell
+  run: |
+    tailscale serve --bg --tcp=2222 tcp://127.0.0.1:22
+    tailscale serve status
+
     - name: Enable Remote Desktop
       run: |
         Write-Host "Enabling Remote Desktop..."
